@@ -1,0 +1,1 @@
+# EmpaChat — Empathetic Response AI

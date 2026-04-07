@@ -1,0 +1,56 @@
+# EmpaChat — Docker Compose
+# Runs API service + Gradio demo with shared model volume
+
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      target: api
+    container_name: empachat-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./outputs:/app/outputs
+      - ./data:/app/data
+    environment:
+      - EMPACHAT_MODEL=gpt2-xl
+      - EMPACHAT_CLASSIFIER_ADAPTER=/app/outputs/classifier/classifier_lora
+      - EMPACHAT_GENERATOR_ADAPTER=/app/outputs/generator/generator_lora
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  demo:
+    build:
+      context: .
+      target: demo
+    container_name: empachat-demo
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./outputs:/app/outputs
+      - ./data:/app/data
+    environment:
+      - EMPACHAT_MODEL=gpt2-xl
+      - EMPACHAT_CLASSIFIER_ADAPTER=/app/outputs/classifier/classifier_lora
+      - EMPACHAT_GENERATOR_ADAPTER=/app/outputs/generator/generator_lora
+    restart: unless-stopped
+    depends_on:
+      - api
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  model-outputs:
