@@ -11,9 +11,11 @@ An end-to-end emotion classification and empathetic response generation system p
 
 ## 🌐 Live demo
 
-**[huggingface.co/spaces/sikdaarrr/EmpaChat](https://huggingface.co/spaces/sikdaarrr/EmpaChat)** — runs the trained
-adapters from [`sikdaarrr/empachat-gpt2xl-lora`](https://huggingface.co/sikdaarrr/empachat-gpt2xl-lora) on a free CPU.
-The Space's code lives in [`space/`](space/).
+- **Results page:** [huggingface.co/spaces/sikdaarrr/EmpaChat](https://huggingface.co/spaces/sikdaarrr/EmpaChat) —
+  a static page ([`space/`](space/)) that reads the measured metrics and sample replies live from the adapter repo
+  [`sikdaarrr/empachat-gpt2xl-lora`](https://huggingface.co/sikdaarrr/empachat-gpt2xl-lora).
+- **Chat with the model:** open [`EmpaChat_Chat_Colab.ipynb`](https://colab.research.google.com/github/sayantansikdar/empathetic-ai/blob/main/EmpaChat_Chat_Colab.ipynb)
+  on a free T4 and **Run all** — it serves [`demo/gradio_app.py`](demo/gradio_app.py) through a public Gradio link.
 
 ## 📊 Results
 

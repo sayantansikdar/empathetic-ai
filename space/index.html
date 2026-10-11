@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EmpaChat — Empathetic Response AI</title>
+  <meta name="description" content="GPT-2 XL with two LoRA adapters: an emotion classifier (GoEmotions) and an empathetic reply generator (EmpatheticDialogues). Metrics and replies come straight from the training run.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #faf9fc;
+      --surface: #ffffff;
+      --surface-2: #f3f0fa;
+      --text: #1c1830;
+      --muted: #625d76;
+      --line: #e6e1f0;
+      --accent: #6d4ae0;
+      --accent-soft: #ece6fd;
+      --pos: #1f8f5f; --pos-soft: #e3f5ec;
+      --neg: #c2414b; --neg-soft: #fbe7e9;
+      --neu: #6b6880; --neu-soft: #eeedf3;
+      --shadow: 0 1px 2px rgba(28, 24, 48, .05), 0 8px 24px rgba(28, 24, 48, .06);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #100e18;
+        --surface: #191624;
+        --surface-2: #211d30;
+        --text: #ece9f6;
+        --muted: #a29db8;
+        --line: #2c2740;
+        --accent: #a58bff;
+        --accent-soft: #2a2245;
+        --pos: #5fd3a0; --pos-soft: #16302a;
+        --neg: #ff8a93; --neg-soft: #3a1d24;
+        --neu: #b3afc7; --neu-soft: #26233a;
+        --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.6 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px; }
+    .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+
+    header { padding: 56px 0 28px; }
+    .eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+    .status { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
+      background: var(--surface-2); border: 1px solid var(--line); font-size: 13px; font-weight: 500; }
+    .status i { width: 8px; height: 8px; border-radius: 50%; background: var(--neu); }
+    .status.ok i { background: var(--pos); }
+    .status.pending i { background: #e0a43a; animation: blink 1.6s ease-in-out infinite; }
+    @keyframes blink { 50% { opacity: .35; } }
+    h1 { font-size: clamp(36px, 6vw, 56px); line-height: 1.05; letter-spacing: -0.03em; margin: 18px 0 14px; }
+    h1 span { color: var(--accent); }
+    .lede { font-size: 18px; color: var(--muted); max-width: 640px; margin: 0; }
+    .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 26px; }
+    .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 18px; border-radius: 12px;
+      font-weight: 600; font-size: 15px; text-decoration: none; border: 1px solid var(--line);
+      color: var(--text); background: var(--surface); box-shadow: var(--shadow);
+      transition: transform .15s ease, border-color .15s ease; }
+    .btn:hover { transform: translateY(-1px); border-color: var(--accent); }
+    .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    @media (prefers-color-scheme: dark) { .btn.primary { color: #120e22; } }
+
+    section { padding: 26px 0; }
+    h2 { font-size: 22px; letter-spacing: -0.01em; margin: 0 0 6px; }
+    .sub { color: var(--muted); margin: 0 0 18px; font-size: 15px; }
+
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 18px; box-shadow: var(--shadow); }
+    .metric .value { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+    .metric .label { font-size: 13px; color: var(--muted); margin-top: 6px; }
+    .metric .value.pending { color: var(--muted); }
+
+    .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 12px; align-items: stretch; }
+    .flow .card h3 { margin: 0 0 4px; font-size: 15px; }
+    .flow .card p { margin: 0; font-size: 14px; color: var(--muted); }
+    .arrow { display: grid; place-items: center; color: var(--muted); font-size: 20px; }
+
+    .samples { display: grid; gap: 14px; }
+    .sample { display: grid; gap: 10px; }
+    .bubble { padding: 12px 16px; border-radius: 16px; max-width: 85%; font-size: 15px; }
+    .user { justify-self: end; background: var(--accent-soft); border-bottom-right-radius: 4px; }
+    .bot { justify-self: start; background: var(--surface-2); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+    .bot b { display: block; font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+    .chip { justify-self: end; font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; text-transform: lowercase; }
+    .chip.positive { color: var(--pos); background: var(--pos-soft); }
+    .chip.negative { color: var(--neg); background: var(--neg-soft); }
+    .chip.neutral { color: var(--neu); background: var(--neu-soft); }
+    .empty { padding: 22px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 16px; }
+
+    details { margin-top: 14px; }
+    summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+    pre { overflow-x: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px;
+      padding: 14px; font-size: 13px; }
+
+    footer { padding: 30px 0 50px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); margin-top: 20px; }
+
+    @media (max-width: 760px) {
+      .metrics { grid-template-columns: 1fr 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); }
+      .bubble { max-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <div class="eyebrow"><span class="status pending" id="status"><i></i><span id="statusText">Checking for a trained model…</span></span></div>
+      <h1>🤗 Emp<span>a</span>Chat</h1>
+      <p class="lede">GPT-2 XL with two LoRA adapters: one reads the emotion in a message, the other writes a reply the
+        way a supportive listener would. Every number and reply on this page is read live from the training run's
+        output on the Hugging Face Hub.</p>
+      <div class="cta">
+        <a class="btn primary" id="colabLink" href="https://colab.research.google.com/github/sayantansikdar/empathetic-ai/blob/main/EmpaChat_Chat_Colab.ipynb" target="_blank" rel="noopener">💬 Chat with it live (free Colab GPU)</a>
+        <a class="btn" href="https://github.com/sayantansikdar/empathetic-ai" target="_blank" rel="noopener">GitHub</a>
+        <a class="btn" id="modelLink" href="https://huggingface.co/sikdaarrr/empachat-gpt2xl-lora" target="_blank" rel="noopener">Model adapters</a>
+      </div>
+    </header>
+
+    <section aria-labelledby="results">
+      <h2 id="results">Measured results</h2>
+      <p class="sub" id="resultsNote">From <span class="mono">metrics.json</span>, written by the training run itself.</p>
+      <div class="metrics">
+        <div class="card metric"><div class="value pending" id="mAcc">—</div><div class="label">Emotion classifier · test accuracy</div></div>
+        <div class="card metric"><div class="value pending" id="mF1">—</div><div class="label">Classifier · macro-F1 (3-class)</div></div>
+        <div class="card metric"><div class="value pending" id="mPpl">—</div><div class="label">Reply generator · validation perplexity</div></div>
+        <div class="card metric"><div class="value pending" id="mParams">—</div><div class="label" id="mParamsLabel">LoRA · trainable parameters</div></div>
+      </div>
+      <details id="reportBox" hidden>
+        <summary>Full classification report</summary>
+        <pre class="mono" id="report"></pre>
+      </details>
+    </section>
+
+    <section aria-labelledby="how">
+      <h2 id="how">How it works</h2>
+      <p class="sub">Two fine-tuned copies of GPT-2 XL (1.5B parameters), each trained with 4-bit QLoRA.</p>
+      <div class="flow">
+        <div class="card"><h3>Your message</h3><p>Normalised the same way as the training data.</p></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="card"><h3>Emotion classifier</h3><p>Trained on <a href="https://huggingface.co/datasets/google-research-datasets/go_emotions" target="_blank" rel="noopener">GoEmotions</a> Reddit comments → positive · negative · neutral.</p></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="card"><h3>Reply generator</h3><p>Trained on real listener replies from <a href="https://huggingface.co/datasets/Estwld/empathetic_dialogues_llm" target="_blank" rel="noopener">EmpatheticDialogues</a>, conditioned on that emotion.</p></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="replies">
+      <h2 id="replies">Replies from the trained model</h2>
+      <p class="sub">Generated by the reply generator at the end of training (<span class="mono">samples.json</span>), unedited.</p>
+      <div class="samples" id="samples">
+        <div class="empty">Waiting for the first training run to publish its samples.</div>
+      </div>
+    </section>
+
+    <footer>
+      Research demo, not a mental-health service. If you're struggling, please reach out to someone you trust or a local helpline.<br>
+      Built by <a href="https://sayantansikdar.software" target="_blank" rel="noopener">Sayantan Sikdar</a> ·
+      GPT-2 XL by OpenAI · datasets by Google Research and Rashkin et al. (2019).
+    </footer>
+  </main>
+
+  <script>
+    const REPO = "sikdaarrr/empachat-gpt2xl-lora";
+    // ?base=<url> points the page at another copy of the adapter folders (local testing).
+    const BASE = new URLSearchParams(location.search).get("base") || `https://huggingface.co/${REPO}/resolve/main`;
+    const $ = (id) => document.getElementById(id);
+
+    async function getJSON(path) {
+      const res = await fetch(`${BASE}/${path}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`${path}: ${res.status}`);
+      return res.json();
+    }
+
+    function setValue(id, text) {
+      const el = $(id);
+      el.textContent = text;
+      el.classList.remove("pending");
+    }
+
+    function renderSamples(samples) {
+      const box = $("samples");
+      box.replaceChildren();
+      for (const s of samples) {
+        const row = document.createElement("div");
+        row.className = "sample";
+        const user = document.createElement("div");
+        user.className = "bubble user";
+        user.textContent = s.user_text;
+        const chip = document.createElement("span");
+        chip.className = `chip ${s.emotion}`;
+        chip.textContent = s.emotion;
+        const bot = document.createElement("div");
+        bot.className = "bubble bot";
+        const who = document.createElement("b");
+        who.textContent = "EmpaChat";
+        bot.append(who, document.createTextNode(s.reply || "…"));
+        row.append(user, chip, bot);
+        box.append(row);
+      }
+    }
+
+    (async () => {
+      const [cls, gen, samples] = await Promise.allSettled([
+        getJSON("classifier/metrics.json"),
+        getJSON("generator/metrics.json"),
+        getJSON("generator/samples.json"),
+      ]);
+
+      if (cls.status === "fulfilled") {
+        const m = cls.value;
+        setValue("mAcc", `${(m.test_accuracy * 100).toFixed(1)}%`);
+        setValue("mF1", m.test_f1_macro.toFixed(3));
+        if (m.report) { $("report").textContent = m.report; $("reportBox").hidden = false; }
+        $("resultsNote").textContent =
+          `From metrics.json, written by the training run: ${m.n_test.toLocaleString()} held-out GoEmotions comments, ` +
+          `${m.n_train.toLocaleString()} training comments, ${m.epochs} epoch(s).`;
+      }
+      if (gen.status === "fulfilled") {
+        const m = gen.value;
+        setValue("mPpl", Number(m.val_perplexity).toFixed(2));
+        setValue("mParams", `${(m.trainable_params / 1e6).toFixed(1)}M`);
+        $("mParamsLabel").textContent =
+          `LoRA · trainable of ${(m.total_params / 1e9).toFixed(2)}B (${((1 - m.trainable_params / m.total_params) * 100).toFixed(1)}% fewer)`;
+      }
+      if (samples.status === "fulfilled" && samples.value.samples?.length) renderSamples(samples.value.samples);
+
+      const trained = cls.status === "fulfilled" && gen.status === "fulfilled";
+      $("status").className = `status ${trained ? "ok" : "pending"}`;
+      $("statusText").textContent = trained
+        ? "Trained · results published"
+        : cls.status === "fulfilled"
+          ? "Classifier published · generator training pending"
+          : "Training pending — results appear here automatically once published";
+    })();
+  </script>
+</body>
+</html>

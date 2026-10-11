@@ -1,407 +1,218 @@
 """
-EmpaChat — Gradio Demo Interface
+EmpaChat — chat demo.
 
-Interactive chat interface with:
-- Real-time emotion detection
-- Empathetic response generation
-- Confidence score visualization
-- Baseline vs fine-tuned model comparison toggle
+Run locally (`python demo/gradio_app.py`) or on a free Colab GPU via
+EmpaChat_Chat_Colab.ipynb (GRADIO_SHARE=1 gives a public link).
 
-Usage: python demo/gradio_app.py
+GPT-2 XL + two LoRA adapters trained with this repo's pipeline:
+  classifier/  GoEmotions → positive / negative / neutral
+  generator/   EmpatheticDialogues listener replies, conditioned on that label
+Adapters and their measured metrics are loaded from ADAPTER_REPO on the Hub.
+Nothing here is canned: if the adapters aren't available, the app says so.
 """
 
-import logging
+import json
 import os
-import sys
-from pathlib import Path
+import re
+from threading import Thread
 
 import gradio as gr
-
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+import torch
+from huggingface_hub import hf_hub_download
+from peft import PeftModel
+from transformers import (
+    AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    TextIteratorStreamer,
 )
-logger = logging.getLogger(__name__)
+
+BASE_MODEL = os.getenv("BASE_MODEL", "gpt2-xl")
+ADAPTER_REPO = os.getenv("ADAPTER_REPO", "sikdaarrr/empachat-gpt2xl-lora")
+# Set LOCAL_ADAPTER_DIR to a folder holding classifier/ and generator/ to run offline.
+LOCAL_ADAPTER_DIR = os.getenv("LOCAL_ADAPTER_DIR")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# fp16 on GPU; bf16 on CPU keeps two 1.5B models within ~7 GB of RAM
+DTYPE = getattr(torch, os.getenv("DTYPE", "float16" if DEVICE == "cuda" else "bfloat16"))
+torch.set_num_threads(max(1, os.cpu_count() or 1))
+
+LABELS = ["positive", "negative", "neutral"]
+PROMPT = "Speaker ({emotion}): {user_text}\nListener:"  # same template as training
+
+# Same normalisation the classifier saw in training (src/preprocessing/text_cleaner.py)
+_URL = re.compile(r"https?://\S+|www\.\S+")
+_USER = re.compile(r"@\w+")
+_SUB = re.compile(r"r/\w+")
+_HTML = re.compile(r"&\w+;")
+_WS = re.compile(r"\s+")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Global Model References
-# ──────────────────────────────────────────────────────────────────────────────
-
-_classifier = None
-_generator = None
-_models_loaded = False
+def clean_text(text: str) -> str:
+    for pat in (_URL, _USER, _SUB, _HTML):
+        text = pat.sub(" ", text)
+    return _WS.sub(" ", text.lower()).strip()
 
 
-def load_models():
-    """Load classifier and generator models."""
-    global _classifier, _generator, _models_loaded
-    
-    if _models_loaded:
+def _adapter_source(sub: str):
+    if LOCAL_ADAPTER_DIR:
+        return os.path.join(LOCAL_ADAPTER_DIR, sub), {}
+    return ADAPTER_REPO, {"subfolder": sub}
+
+
+def _metrics(sub: str) -> dict:
+    try:
+        if LOCAL_ADAPTER_DIR:
+            path = os.path.join(LOCAL_ADAPTER_DIR, sub, "metrics.json")
+        else:
+            path = hf_hub_download(ADAPTER_REPO, "metrics.json", subfolder=sub)
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+CLS_METRICS, GEN_METRICS = _metrics("classifier"), _metrics("generator")
+READY = bool(CLS_METRICS and GEN_METRICS)
+classifier = generator = tokenizer = None
+
+if READY:
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    src, kw = _adapter_source("classifier")
+    base = AutoModelForSequenceClassification.from_pretrained(
+        BASE_MODEL, num_labels=len(LABELS), torch_dtype=DTYPE, pad_token_id=tokenizer.eos_token_id
+    )
+    classifier = PeftModel.from_pretrained(base, src, **kw).merge_and_unload().to(DEVICE).eval()
+
+    src, kw = _adapter_source("generator")
+    base = AutoModelForCausalLM.from_pretrained(BASE_MODEL, torch_dtype=DTYPE)
+    generator = PeftModel.from_pretrained(base, src, **kw).merge_and_unload().to(DEVICE).eval()
+    NEWLINE = tokenizer.encode("\n")[0]
+
+
+@torch.inference_mode()
+def tidy(reply: str) -> str:
+    """First line only; drop a trailing half-sentence if the token budget cut it."""
+    reply = reply.split("\n")[0].strip()
+    if reply and reply[-1] not in ".!?\"')":
+        cut = max(reply.rfind(p) for p in (". ", "! ", "? "))
+        if cut > 0:
+            reply = reply[: cut + 1]
+    return reply
+
+
+def classify(text: str) -> dict:
+    ids = tokenizer(clean_text(text), return_tensors="pt", truncation=True, max_length=64).to(DEVICE)
+    probs = torch.softmax(classifier(**ids).logits.float(), dim=-1)[0]
+    return {label: float(p) for label, p in zip(LABELS, probs)}
+
+
+def respond(message: str, history: list):
+    """Classify the message, then stream the generator's reply."""
+    message = (message or "").strip()
+    if not message:
+        yield history, gr.update(), ""
         return
-    
-    model_name = os.getenv("EMPACHAT_MODEL", "gpt2-xl")
-    
-    try:
-        from src.models.emotion_classifier import EmotionClassifier
-        
-        classifier_adapter = os.getenv(
-            "EMPACHAT_CLASSIFIER_ADAPTER",
-            "./outputs/classifier/classifier_lora",
+    if not READY:
+        history = history + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": "⚠️ The trained adapters aren't on the Hub yet, so there's no model to answer with."},
+        ]
+        yield history, gr.update(), ""
+        return
+
+    scores = classify(message)
+    emotion = max(scores, key=scores.get)
+    history = history + [{"role": "user", "content": message}, {"role": "assistant", "content": ""}]
+    yield history, scores, ""
+
+    prompt = PROMPT.format(emotion=emotion, user_text=message)
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=128).to(DEVICE)
+    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    kwargs = dict(
+        **inputs,
+        streamer=streamer,
+        max_new_tokens=60,
+        do_sample=True,
+        temperature=0.7,
+        top_p=0.9,
+        top_k=50,
+        repetition_penalty=1.2,
+        no_repeat_ngram_size=3,
+        eos_token_id=[tokenizer.eos_token_id, NEWLINE],
+        pad_token_id=tokenizer.eos_token_id,
+    )
+    Thread(target=lambda: torch.inference_mode()(generator.generate)(**kwargs), daemon=True).start()
+
+    reply = ""
+    for chunk in streamer:
+        reply += chunk
+        history[-1]["content"] = reply.split("\n")[0].strip()
+        yield history, scores, ""
+    history[-1]["content"] = tidy(reply) or "…"
+    yield history, scores, ""
+
+
+def _header() -> str:
+    if not READY:
+        return (
+            "### ⏳ Model not published yet\n"
+            f"Waiting for trained adapters at `{ADAPTER_REPO}`. "
+            "Run the training notebook in the GitHub repo to create them."
         )
-        
-        _classifier = EmotionClassifier(
-            model_name=model_name,
-            num_classes=3,
-            use_lora=True,
-            lora_adapter_path=classifier_adapter if Path(classifier_adapter).exists() else None,
-        )
-        _classifier.load_model()
-        logger.info("Classifier loaded for demo")
-    except Exception as e:
-        logger.error(f"Failed to load classifier: {e}")
-        _classifier = None
-    
-    try:
-        from src.models.response_generator import ResponseGenerator
-        
-        generator_adapter = os.getenv(
-            "EMPACHAT_GENERATOR_ADAPTER",
-            "./outputs/generator/generator_lora",
-        )
-        
-        _generator = ResponseGenerator(
-            model_name=model_name,
-            use_lora=True,
-            lora_adapter_path=generator_adapter if Path(generator_adapter).exists() else None,
-        )
-        _generator.load_model()
-        logger.info("Generator loaded for demo")
-    except Exception as e:
-        logger.error(f"Failed to load generator: {e}")
-        _generator = None
-    
-    _models_loaded = True
+    acc = CLS_METRICS.get("test_accuracy", 0) * 100
+    f1 = CLS_METRICS.get("test_f1_macro", 0)
+    ppl = GEN_METRICS.get("val_perplexity")
+    trainable = GEN_METRICS.get("trainable_params", 0)
+    total = GEN_METRICS.get("total_params", 0) or 1
+    return (
+        f"**Emotion classifier** — {acc:.1f}% test accuracy · macro-F1 {f1:.3f} "
+        f"on {CLS_METRICS.get('n_test', 0):,} held-out GoEmotions comments (3-class)  \n"
+        f"**Reply generator** — trained on {GEN_METRICS.get('n_train', 0):,} real EmpatheticDialogues "
+        f"listener replies · validation perplexity {ppl}  \n"
+        f"**LoRA** — {trainable/1e6:.1f}M trainable of {total/1e9:.2f}B parameters "
+        f"({(1 - trainable/total)*100:.1f}% fewer) · base `{BASE_MODEL}`"
+    )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Handler Functions
-# ──────────────────────────────────────────────────────────────────────────────
+EXAMPLES = [
+    "I just got promoted at work and I'm so excited about it!",
+    "My grandmother passed away last week and I miss her so much.",
+    "I failed my exam even though I studied really hard.",
+    "I've been thinking about my old school friends lately.",
+    "I feel completely overwhelmed and don't know what to do anymore.",
+]
 
-def classify_emotion(text: str) -> tuple:
-    """Classify emotion and return label + confidence bar data."""
-    if not text or not text.strip():
-        return "⏳ Enter a message...", None
-    
-    if _classifier is None:
-        # Fallback: simple keyword-based classification
-        return _fallback_classify(text)
-    
-    try:
-        from src.preprocessing.text_cleaner import clean_text
-        cleaned = clean_text(text)
-        emotion, scores = _classifier.predict(cleaned)
-        
-        # Format emotion display
-        emotion_emoji = {
-            "positive": "😊",
-            "negative": "😢",
-            "neutral": "😐",
-        }
-        emoji = emotion_emoji.get(emotion, "🤔")
-        display = f"{emoji} **{emotion.upper()}** (confidence: {max(scores.values()):.1%})"
-        
-        # Bar chart data
-        bar_data = {k: v for k, v in sorted(scores.items(), key=lambda x: -x[1])}
-        
-        return display, bar_data
-        
-    except Exception as e:
-        logger.error(f"Classification error: {e}")
-        return f"⚠️ Error: {str(e)}", None
+with gr.Blocks(title="EmpaChat — Empathetic Response AI") as demo:
+    gr.Markdown(
+        "# 🤗 EmpaChat\n"
+        "GPT-2 XL with two LoRA adapters: one reads the emotion in your message, "
+        "the other writes a reply the way a supportive listener would.\n\n" + _header()
+    )
+    with gr.Row():
+        with gr.Column(scale=3):
+            chat = gr.Chatbot(height=420, label="Conversation")
+            box = gr.Textbox(placeholder="Tell EmpaChat how you're feeling…", show_label=False, lines=1, max_lines=4)
+            with gr.Row():
+                send = gr.Button("Send", variant="primary")
+                clear = gr.Button("Clear")
+        with gr.Column(scale=2):
+            emotion = gr.Label(label="Detected emotion", num_top_classes=3)
+            gr.Markdown(
+                ("Running on a GPU — replies stream in within a few seconds.  \n" if DEVICE == "cuda" else
+                 "Running on CPU, so a reply takes roughly 20–60 seconds and streams in as it's written.  \n")
+                + "This is a research demo, not a support service. If you're struggling, please reach out "
+                "to someone you trust or a local helpline."
+            )
+    gr.Examples(EXAMPLES, inputs=box)
 
-
-def _fallback_classify(text: str) -> tuple:
-    """Simple keyword-based fallback classifier."""
-    text_lower = text.lower()
-    
-    positive_words = {"happy", "great", "love", "amazing", "wonderful", "excited", 
-                      "glad", "joy", "thankful", "grateful", "awesome", "fantastic"}
-    negative_words = {"sad", "angry", "upset", "terrible", "hate", "awful", 
-                      "disappointed", "frustrated", "worried", "scared", "hurt", "pain"}
-    
-    words = set(text_lower.split())
-    pos_count = len(words & positive_words)
-    neg_count = len(words & negative_words)
-    
-    if pos_count > neg_count:
-        scores = {"positive": 0.7, "neutral": 0.2, "negative": 0.1}
-        return "😊 **POSITIVE** (fallback)", scores
-    elif neg_count > pos_count:
-        scores = {"negative": 0.7, "neutral": 0.2, "positive": 0.1}
-        return "😢 **NEGATIVE** (fallback)", scores
-    else:
-        scores = {"neutral": 0.6, "positive": 0.2, "negative": 0.2}
-        return "😐 **NEUTRAL** (fallback)", scores
-
-
-def generate_response(text: str, use_baseline: bool = False) -> str:
-    """Generate empathetic response."""
-    if not text or not text.strip():
-        return "Please enter a message to get a response."
-    
-    # First classify the emotion
-    if _classifier is not None:
-        try:
-            from src.preprocessing.text_cleaner import clean_text
-            cleaned = clean_text(text)
-            emotion, _ = _classifier.predict(cleaned)
-        except Exception:
-            emotion = "neutral"
-    else:
-        emotion = "neutral"
-    
-    if use_baseline:
-        return _baseline_response(emotion)
-    
-    if _generator is not None:
-        try:
-            return _generator.generate_response(text, emotion)
-        except Exception as e:
-            logger.error(f"Generation error: {e}")
-            return _empathetic_fallback(text, emotion)
-    else:
-        return _empathetic_fallback(text, emotion)
-
-
-def _baseline_response(emotion: str) -> str:
-    """Simple baseline response (non-fine-tuned)."""
-    import random
-    responses = {
-        "positive": ["That's nice.", "Good for you.", "Okay, cool."],
-        "negative": ["Sorry to hear that.", "That's unfortunate.", "Hang in there."],
-        "neutral": ["I see.", "Okay.", "Got it."],
-    }
-    return random.choice(responses.get(emotion, responses["neutral"]))
-
-
-def _empathetic_fallback(text: str, emotion: str) -> str:
-    """High-quality empathetic fallback when model isn't available."""
-    import random
-    responses = {
-        "positive": [
-            "That's absolutely wonderful! I can truly feel your joy and excitement. Moments like these are what make life beautiful — savor every second of it! 🌟",
-            "I'm so happy to hear that! Your positive energy is infectious. Thank you for sharing this beautiful moment with me. You truly deserve all this happiness! ✨",
-        ],
-        "negative": [
-            "I'm truly sorry you're going through this. Your feelings are completely valid, and I want you to know that you're not alone. Take it one step at a time — things will get better. 💙",
-            "My heart goes out to you. What you're experiencing sounds incredibly difficult, and your strength in sharing this doesn't go unnoticed. I'm here for you, no matter what. 🤗",
-        ],
-        "neutral": [
-            "Thank you for sharing that with me. I appreciate you opening up, and I'm here if you'd like to explore these thoughts further or just need someone to listen. 🙏",
-            "I hear you. It sounds like you're processing a lot right now. Sometimes just putting thoughts into words can bring clarity. What feels most important to you right now? 💭",
-        ],
-    }
-    return random.choice(responses.get(emotion, responses["neutral"]))
-
-
-def chat_handler(message: str, history: list, use_baseline: bool) -> tuple:
-    """Handle chat messages — classify + generate."""
-    emotion_display, scores = classify_emotion(message)
-    response = generate_response(message, use_baseline)
-    
-    history = history or []
-    history.append((message, response))
-    
-    return history, emotion_display, scores
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Gradio Interface
-# ──────────────────────────────────────────────────────────────────────────────
-
-def create_demo():
-    """Build the Gradio interface."""
-    
-    # Custom CSS for premium look
-    custom_css = """
-    .gradio-container {
-        font-family: 'Inter', 'Segoe UI', sans-serif !important;
-        max-width: 1200px !important;
-        margin: auto !important;
-    }
-    .header-text {
-        text-align: center;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-size: 2.5rem;
-        font-weight: 800;
-        margin-bottom: 0.5rem;
-    }
-    .subtitle {
-        text-align: center;
-        color: #6b7280;
-        font-size: 1.1rem;
-        margin-bottom: 2rem;
-    }
-    .emotion-display {
-        font-size: 1.3rem;
-        padding: 1rem;
-        border-radius: 12px;
-        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-    }
-    """
-    
-    with gr.Blocks(
-        title="EmpaChat — Empathetic Response AI",
-        css=custom_css,
-        theme=gr.themes.Soft(
-            primary_hue="violet",
-            secondary_hue="blue",
-            neutral_hue="slate",
-        ),
-    ) as demo:
-        
-        # Header
-        gr.HTML("""
-            <div style="text-align: center; padding: 1rem;">
-                <h1 class="header-text">🤗 EmpaChat</h1>
-                <p class="subtitle">
-                    Empathetic Response AI — Powered by GPT-2 XL with LoRA Fine-tuning
-                </p>
-            </div>
-        """)
-        
-        with gr.Row():
-            # Left Column — Chat
-            with gr.Column(scale=3):
-                chatbot = gr.Chatbot(
-                    label="Conversation",
-                    height=500,
-                    type="tuples",
-                    show_copy_button=True,
-                    avatar_images=(None, "🤗"),
-                )
-                
-                with gr.Row():
-                    msg_input = gr.Textbox(
-                        label="Your message",
-                        placeholder="Type how you're feeling...",
-                        lines=2,
-                        scale=4,
-                    )
-                    send_btn = gr.Button(
-                        "Send 💬",
-                        variant="primary",
-                        scale=1,
-                    )
-                
-                with gr.Row():
-                    use_baseline = gr.Checkbox(
-                        label="🔄 Use baseline model (comparison mode)",
-                        value=False,
-                    )
-                    clear_btn = gr.Button("🗑️ Clear Chat", variant="secondary")
-            
-            # Right Column — Emotion Analysis
-            with gr.Column(scale=2):
-                emotion_label = gr.Markdown(
-                    value="⏳ Send a message to detect emotion...",
-                    label="Detected Emotion",
-                )
-                
-                confidence_chart = gr.Label(
-                    label="Confidence Scores",
-                    num_top_classes=3,
-                )
-                
-                gr.Markdown("---")
-                
-                gr.Markdown("""
-                ### ℹ️ About EmpaChat
-                
-                **EmpaChat** uses a fine-tuned GPT-2 XL model with **LoRA adapters** 
-                to detect emotions and generate empathetic responses.
-                
-                **Key Features:**
-                - 🎯 89% emotion classification accuracy
-                - ⚡ 99.4% parameter reduction via LoRA
-                - 📊 32% improvement in A/B testing
-                - 🔄 Toggle baseline comparison
-                
-                **Emotion Categories:**
-                - 😊 **Positive**: Joy, excitement, gratitude...
-                - 😢 **Negative**: Sadness, anger, fear...
-                - 😐 **Neutral**: Information, questions...
-                """)
-        
-        # Examples
-        gr.Examples(
-            examples=[
-                ["I just got promoted at work and I'm so excited about it!"],
-                ["My grandmother passed away last week and I miss her so much."],
-                ["I failed my exam even though I studied really hard."],
-                ["I'm thinking about what to cook for dinner tonight."],
-                ["Someone left me the kindest note today, it made my whole week!"],
-                ["I feel completely overwhelmed and don't know what to do anymore."],
-            ],
-            inputs=msg_input,
-            label="💡 Try these examples",
-        )
-        
-        # ── Event Handlers ───────────────────────────────────────────────────
-        
-        def on_send(message, history, baseline):
-            if not message.strip():
-                return history, "⏳ Enter a message...", None
-            return chat_handler(message, history, baseline)
-        
-        send_btn.click(
-            fn=on_send,
-            inputs=[msg_input, chatbot, use_baseline],
-            outputs=[chatbot, emotion_label, confidence_chart],
-        ).then(
-            fn=lambda: "",
-            outputs=msg_input,
-        )
-        
-        msg_input.submit(
-            fn=on_send,
-            inputs=[msg_input, chatbot, use_baseline],
-            outputs=[chatbot, emotion_label, confidence_chart],
-        ).then(
-            fn=lambda: "",
-            outputs=msg_input,
-        )
-        
-        clear_btn.click(
-            fn=lambda: ([], "⏳ Send a message to detect emotion...", None),
-            outputs=[chatbot, emotion_label, confidence_chart],
-        )
-    
-    return demo
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────────────────────────────────────
+    send.click(respond, [box, chat], [chat, emotion, box])
+    box.submit(respond, [box, chat], [chat, emotion, box])
+    clear.click(lambda: ([], None, ""), outputs=[chat, emotion, box])
 
 if __name__ == "__main__":
-    # Try to load models (may fail if not trained yet)
-    try:
-        load_models()
-    except Exception as e:
-        logger.warning(f"Could not load models: {e}")
-        logger.info("Running in fallback mode with heuristic responses")
-    
-    demo = create_demo()
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        show_error=True,
+    demo.queue(default_concurrency_limit=1).launch(
+        theme=gr.themes.Soft(primary_hue="violet"),
+        share=os.getenv("GRADIO_SHARE") == "1",
     )

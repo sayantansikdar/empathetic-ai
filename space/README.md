@@ -3,10 +3,8 @@ title: EmpaChat
 emoji: 🤗
 colorFrom: purple
 colorTo: indigo
-sdk: gradio
-sdk_version: 6.30.0
-python_version: "3.11"
-app_file: app.py
+sdk: static
+app_file: index.html
 pinned: false
 license: mit
 short_description: Emotion-aware empathetic replies — GPT-2 XL + LoRA
@@ -24,11 +22,10 @@ GPT-2 XL (1.5B) with two LoRA adapters, trained with the pipeline in
 [sayantansikdar/empathetic-ai](https://github.com/sayantansikdar/empathetic-ai):
 
 - **Emotion classifier** — GoEmotions mapped to positive / negative / neutral.
-- **Reply generator** — real listener replies from EmpatheticDialogues,
-  conditioned on the detected emotion; loss on the reply only.
+- **Reply generator** — real listener replies from EmpatheticDialogues, conditioned on the detected emotion.
 
-The metrics shown in the app are read from the adapters' `metrics.json`,
-written by the training run itself. The Space runs on a free CPU, so replies
-take a little while and stream in as they are generated.
-
-This is a research demo, not a mental-health service.
+This static page reads the measured metrics and sample replies live from
+[`sikdaarrr/empachat-gpt2xl-lora`](https://huggingface.co/sikdaarrr/empachat-gpt2xl-lora).
+To chat with the model, open the
+[chat notebook](https://colab.research.google.com/github/sayantansikdar/empathetic-ai/blob/main/EmpaChat_Chat_Colab.ipynb)
+on a free Colab GPU.
