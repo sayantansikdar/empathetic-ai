@@ -2,7 +2,7 @@
 Emotion classification trainer using LoRA-adapted GPT-2 XL.
 
 Trains on GoEmotions dataset with HuggingFace Trainer + PEFT integration.
-Target: 89% accuracy on 3-class simplified test set.
+Writes the measured test metrics to <output_dir>/classifier_lora/metrics.json.
 
 Usage:
     python -m src.training.train_classifier --lora --epochs 3 --num_classes 3
@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from src.models.emotion_classifier import EmotionClassifier
 from src.preprocessing.data_loader import create_tokenized_datasets
 from src.preprocessing.text_cleaner import get_label_names
+from src.utils.hub import push_adapter, write_json
 
 logging.basicConfig(
     level=logging.INFO,
@@ -125,6 +126,8 @@ def train_classifier(args):
         num_classes=args.num_classes,
         max_length=args.max_length,
         cache_dir=args.data_dir,
+        max_train_samples=getattr(args, "max_train_samples", None),
+        max_eval_samples=getattr(args, "max_eval_samples", None),
     )
     # Rename 'label' to 'labels' for HuggingFace Trainer compatibility
     tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
@@ -150,12 +153,12 @@ def train_classifier(args):
         warmup_steps=warmup_steps,
         lr_scheduler_type="cosine",
         eval_strategy="steps",
-        eval_steps=500,
+        eval_steps=getattr(args, "save_steps", 500),
         save_strategy="steps",
-        save_steps=500,
-        save_total_limit=3,
+        save_steps=getattr(args, "save_steps", 500),
+        save_total_limit=2,
         load_best_model_at_end=False,
-        logging_steps=100,
+        logging_steps=50,
         report_to=["mlflow"] if mlflow_enabled else ["none"],
         fp16=torch.cuda.is_available() and not force_cpu,
         dataloader_num_workers=0 if force_cpu else 2,
@@ -185,7 +188,14 @@ def train_classifier(args):
     logger.info("Starting training...")
     start_time = time.time()
     
-    train_result = trainer.train()
+    # Resume from the latest checkpoint if a previous session was cut off
+    # (on Colab, point --output_dir at Google Drive so checkpoints survive).
+    last_ckpt = None
+    ckpts = sorted(Path(output_dir).glob("checkpoint-*"), key=lambda p: int(p.name.split("-")[-1]))
+    if ckpts:
+        last_ckpt = str(ckpts[-1])
+        logger.info(f"Resuming from {last_ckpt}")
+    train_result = trainer.train(resume_from_checkpoint=last_ckpt)
     
     train_time = time.time() - start_time
     logger.info(f"Training completed in {train_time:.1f}s ({train_time/60:.1f}min)")
@@ -232,26 +242,42 @@ def train_classifier(args):
         mlflow.log_artifact(str(report_path))
         mlflow.end_run()
     
-    # ── Save LoRA Adapter ────────────────────────────────────────────────────
+    # ── Save LoRA Adapter + measured metrics ─────────────────────────────────
     adapter_dir = f"{output_dir}/classifier_lora"
     classifier.model = model  # Update with trained model
     classifier.save_adapter(adapter_dir)
-    logger.info(f"LoRA adapter saved to {adapter_dir}")
+
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    metrics = {
+        "task": f"GoEmotions → {args.num_classes}-class sentiment",
+        "base_model": args.model_name,
+        "quantized_4bit": bool(args.quantize),
+        "test_accuracy": round(float(accuracy), 4),
+        "test_f1_macro": round(float(f1_macro), 4),
+        "test_f1_weighted": round(float(f1_weighted), 4),
+        "n_train": len(tokenized_datasets["train"]),
+        "n_test": len(tokenized_datasets["test"]),
+        "epochs": args.epochs,
+        "max_length": args.max_length,
+        "trainable_params": int(trainable),
+        "total_params": int(total),
+        "train_minutes": round(train_time / 60, 1),
+        "report": report,
+    }
+    write_json(f"{adapter_dir}/metrics.json", metrics)
+    push_adapter(adapter_dir, getattr(args, "hub_repo", None), "classifier",
+                 f"Classifier adapter — test accuracy {accuracy:.4f}")
     
     # ── Summary ──────────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
-    print(f"  TRAINING COMPLETE")
+    print(f"  CLASSIFIER TRAINING COMPLETE")
     print(f"{'='*60}")
-    print(f"  Accuracy:       {accuracy*100:.1f}%  (target: 89%)")
+    print(f"  Test accuracy:  {accuracy*100:.1f}%")
     print(f"  F1 (macro):     {f1_macro:.4f}")
     print(f"  F1 (weighted):  {f1_weighted:.4f}")
     print(f"  Training time:  {train_time/60:.1f} minutes")
     print(f"  Adapter saved:  {adapter_dir}")
-    
-    if accuracy >= 0.89:
-        print(f"  ✅ TARGET ACHIEVED — {accuracy*100:.1f}% >= 89%")
-    else:
-        print(f"  ⚠️  Below target — {accuracy*100:.1f}% < 89%")
     print(f"{'='*60}\n")
     
     return test_results
@@ -287,6 +313,14 @@ def parse_args():
                         help="Learning rate")
     parser.add_argument("--max_length", type=int, default=128,
                         help="Max tokenization length")
+    parser.add_argument("--max_train_samples", type=int, default=None,
+                        help="Cap the training split (time-boxed runs)")
+    parser.add_argument("--max_eval_samples", type=int, default=None,
+                        help="Cap the validation/test splits (smoke tests)")
+    parser.add_argument("--save_steps", type=int, default=500,
+                        help="Checkpoint/eval interval in steps")
+    parser.add_argument("--hub_repo", type=str, default=None,
+                        help="Push the adapter to this Hugging Face repo (subfolder 'classifier')")
     
     # Paths
     parser.add_argument("--output_dir", type=str, default="./outputs/classifier",

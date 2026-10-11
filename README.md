@@ -1,6 +1,6 @@
 # 🤗 EmpaChat — Empathetic Response AI
 
-An end-to-end emotion classification and empathetic response generation system powered by **GPT-2 XL** with **LoRA fine-tuning** on the **GoEmotions dataset**.
+An end-to-end emotion classification and empathetic response generation system powered by **GPT-2 XL** with **LoRA fine-tuning**: an emotion classifier trained on **GoEmotions** and a reply generator trained on real listener replies from **EmpatheticDialogues**.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-ee4c2c?logo=pytorch)
@@ -9,14 +9,28 @@ An end-to-end emotion classification and empathetic response generation system p
 
 ---
 
-## 📊 Key Results
+## 🌐 Live demo
 
-| Metric | Target | Achieved |
-|--------|--------|----------|
-| Emotion Classification Accuracy | ≥ 89% | ✅ ~89% (3-class) |
-| Parameter Reduction (LoRA) | 99.4% | ✅ 99.4% (1.5B → ~8.4M) |
-| A/B Test Improvement | ≥ 32% | ✅ ~35% (simulated) |
-| Inference Latency | < 200ms | ✅ ~150ms (GPU) |
+**[huggingface.co/spaces/sikdaarrr/EmpaChat](https://huggingface.co/spaces/sikdaarrr/EmpaChat)** — runs the trained
+adapters from [`sikdaarrr/empachat-gpt2xl-lora`](https://huggingface.co/sikdaarrr/empachat-gpt2xl-lora) on a free CPU.
+The Space's code lives in [`space/`](space/).
+
+## 📊 Results
+
+Measured by the training run and published next to each adapter as `metrics.json`
+(the Space reads them from there):
+
+| Stage | Metric | Result |
+|---|---|---|
+| Emotion classifier | Test accuracy / macro-F1 (GoEmotions, 3-class) | *published after the first full training run* |
+| Reply generator | Validation perplexity (EmpatheticDialogues replies) | *published after the first full training run* |
+| LoRA | Trainable parameters (GPT-2 XL, r = 8) | ≈9.8M of ≈1.56B (≈99.4% fewer) |
+
+## ☁️ Train on a free Colab GPU
+
+Open [`EmpaChat_Colab_Training.ipynb`](EmpaChat_Colab_Training.ipynb) in Colab with a **T4** runtime and run it top to
+bottom. Both stages train with 4-bit QLoRA, checkpoint to Google Drive (a disconnected session resumes where it left
+off), and push their adapters + metrics to the Hub as soon as they finish.
 
 ---
 

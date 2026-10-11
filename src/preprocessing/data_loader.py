@@ -133,9 +133,14 @@ def create_tokenized_datasets(
     max_length: int = 128,
     cache_dir: str = "./data",
     num_proc: int = 4,
+    max_train_samples: Optional[int] = None,
+    max_eval_samples: Optional[int] = None,
 ) -> DatasetDict:
     """
     Full pipeline: load → preprocess → tokenize GoEmotions.
+
+    max_train_samples / max_eval_samples cap the splits (shuffled, seed 42)
+    for time-boxed runs such as a free Colab session or a smoke test.
     
     Args:
         tokenizer: GPT-2 tokenizer (left-padded).
@@ -158,6 +163,9 @@ def create_tokenized_datasets(
     # Load and preprocess
     raw_dataset = load_goemotions(cache_dir=cache_dir)
     processed = preprocess_dataset(raw_dataset, num_classes=num_classes, num_proc=num_proc)
+    for split, cap in (("train", max_train_samples), ("validation", max_eval_samples), ("test", max_eval_samples)):
+        if cap and split in processed and len(processed[split]) > cap:
+            processed[split] = processed[split].shuffle(seed=42).select(range(cap))
     
     # Tokenize
     def tokenize_fn(examples):

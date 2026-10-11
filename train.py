@@ -16,6 +16,9 @@ import sys
 import time
 from pathlib import Path
 
+# The log file lives in outputs/, so the folder must exist before logging starts.
+Path("outputs").mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
@@ -60,7 +63,20 @@ Examples:
     parser.add_argument("--epochs", type=int, default=3, help="Training epochs")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
-    parser.add_argument("--max_length", type=int, default=128, help="Max sequence length")
+    parser.add_argument("--max_length", type=int, default=64,
+                        help="Classifier max sequence length (GoEmotions comments are short)")
+    parser.add_argument("--gen_max_length", type=int, default=128,
+                        help="Generator max sequence length (prompt + reply)")
+    parser.add_argument("--gen_batch_size", type=int, default=None,
+                        help="Generator batch size (defaults to --batch_size)")
+    parser.add_argument("--max_train_samples", type=int, default=None,
+                        help="Cap training examples per stage (time-boxed runs)")
+    parser.add_argument("--max_eval_samples", type=int, default=None,
+                        help="Cap evaluation examples per stage (smoke tests)")
+    parser.add_argument("--save_steps", type=int, default=500,
+                        help="Checkpoint/eval interval; checkpoints allow resuming a cut-off run")
+    parser.add_argument("--hub_repo", type=str, default=None,
+                        help="Push each adapter to this Hugging Face repo as soon as its stage finishes")
     
     # ── Pipeline Control ─────────────────────────────────────────────────────
     parser.add_argument("--skip_classifier", action="store_true",
@@ -158,6 +174,10 @@ Examples:
             output_dir = f"{args.output_dir}/classifier"
             data_dir = args.data_dir
             mlflow_uri = args.mlflow_uri
+            max_train_samples = args.max_train_samples
+            max_eval_samples = args.max_eval_samples
+            save_steps = args.save_steps
+            hub_repo = args.hub_repo
         
         classifier_results = train_classifier(ClassifierArgs())
         logger.info(f"Classifier results: {classifier_results}")
@@ -179,13 +199,17 @@ Examples:
             lora = args.lora
             quantize = args.quantize
             epochs = args.epochs
-            batch_size = max(2, args.batch_size // 2)  # Smaller batch for gen
+            batch_size = args.gen_batch_size or args.batch_size
             lr = args.lr
-            max_length = 256
+            max_length = args.gen_max_length
             device = args.device
             output_dir = f"{args.output_dir}/generator"
             data_dir = args.data_dir
             mlflow_uri = args.mlflow_uri
+            max_train_samples = args.max_train_samples
+            max_eval_samples = args.max_eval_samples
+            save_steps = args.save_steps
+            hub_repo = args.hub_repo
         
         generator_results = train_generator(GeneratorArgs())
         logger.info(f"Generator results: {generator_results}")

@@ -16,7 +16,7 @@ from transformers import (
     AutoTokenizer,
     GPT2ForSequenceClassification,
 )
-from peft import PeftModel, get_peft_model
+from peft import PeftModel, get_peft_model, prepare_model_for_kbit_training
 
 from .lora_config import (
     get_lora_config,
@@ -130,7 +130,9 @@ class EmotionClassifier:
                     self.model, self.lora_adapter_path
                 )
             else:
-                # Apply fresh LoRA config
+                # Apply fresh LoRA config (QLoRA needs the k-bit training prep first)
+                if self.use_quantization and self.device == "cuda":
+                    self.model = prepare_model_for_kbit_training(self.model, use_gradient_checkpointing=False)
                 lora_config = get_lora_config(task_type="SEQ_CLS")
                 self.model = get_peft_model(self.model, lora_config)
             
